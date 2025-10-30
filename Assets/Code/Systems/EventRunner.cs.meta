@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: ae0f99084b50ce7468bb6709ab38b4cd
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences:
+  - narrativeText: {instanceID: 0}
+  - choicesParent: {instanceID: 0}
+  - choiceButtonPrefab: {fileID: 6856375419573340571, guid: b4069c51cd2b8b94a825200705d5b332, type: 3}
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
