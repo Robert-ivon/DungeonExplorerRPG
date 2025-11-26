@@ -3,13 +3,13 @@ using System.Collections.Generic;
 using UnityEngine;
 using TMPro;
 using UnityEngine.UI;
+using UnityEngine.SceneManagement;
 
 public class CombatManager : MonoBehaviour
 {
     [Header("Stats")]
     public CharacterStatsSO playerStats;
-    [Tooltip("Assign one or more enemy CharacterStatsSO here to spawn multiple enemies")]
-    public CharacterStatsSO[] enemyStatsArray; 
+    public CharacterStatsSO[] enemyStatsArray;
 
     [Header("Skills")]
     public SkillSO[] availableSkills;
@@ -18,8 +18,8 @@ public class CombatManager : MonoBehaviour
     public Image BackgroundSprite;
 
     [Header("UI - Enemy")]
-    public Image enemySprite;           
-    public TextMeshProUGUI enemyHPText; 
+    public Image enemySprite;
+    public TextMeshProUGUI enemyHPText;
 
     [Header("UI - Player")]
     public Image playerSprite;
@@ -42,16 +42,23 @@ public class CombatManager : MonoBehaviour
     public Transform skillButtonsContainer;
 
     [Header("Animation / Turn timing")]
-    public float attackMoveDuration = 0.35f;        // how long attack move takes
-    public float attackMoveDistance = 50f;         // distance used for AttackMove calls
-    public float damageFlashDuration = 0.12f;      // flash time for TakeDamageFlash
-    public int damageFlashes = 2;                  // number of flashes
-    public float turnPause = 0.25f;                // pause between actions to make turns clear
+    public float attackMoveDuration = 0.35f;
+    public float attackMoveDistance = 50f;
+    public float damageFlashDuration = 0.12f;
+    public int damageFlashes = 2;
+    public float turnPause = 0.25f;
 
     [Header("Turn indicator")]
-    public TextMeshProUGUI turnIndicatorText;      // optional UI text to show "Player Turn"/"Enemy Turn"
+    public TextMeshProUGUI turnIndicatorText;
 
-    // runtime state
+    [Header("Target Selection")]
+    public GameObject targetSelectionPanel;
+    public Transform targetButtonsContainer;
+    public Button targetButtonPrefab;
+
+    private int selectedTargetIndex = -1;
+    private SkillSO selectedSkill = null;
+
     private int playerHP;
     private int playerMP;
 
@@ -60,32 +67,51 @@ public class CombatManager : MonoBehaviour
         public CharacterStatsSO stats;
         public int currentHP;
         public int currentMP;
-        public string displayName; // with suffix if needed
+        public string displayName;
         public Sprite portrait;
         public bool IsAlive => currentHP > 0;
     }
 
     private List<EnemyInstance> enemies = new List<EnemyInstance>();
-
     private string logContent = "";
 
+    // --------------------------------------------------------------
+    // START
+    // --------------------------------------------------------------
     void Start()
     {
-        // initialize player
-        playerHP = playerStats.maxHP;
-        playerMP = playerStats.maxMP;
-        if (playerStats.portrait != null && playerSprite != null)
+        // Pull data from BattleData (if available)
+        if (BattleData.playerStats != null)
+            playerStats = BattleData.playerStats;
+
+        if (BattleData.pendingEnemies != null)
+            enemyStatsArray = BattleData.pendingEnemies;
+
+        // Safety: ensure playerStats is assigned
+        if (playerStats == null)
+        {
+            Debug.LogError("CombatManager: playerStats is null! Assign a CharacterStatsSO or set BattleData.playerStats before loading.");
+            // Prevent further null issues by creating a minimal placeholder (avoid crashes)
+            playerStats = ScriptableObject.CreateInstance<CharacterStatsSO>();
+            playerStats.displayName = "Player";
+            playerStats.maxHP = 1;
+            playerStats.maxMP = 0;
+            playerStats.attack = 1;
+            playerStats.defense = 0;
+            playerStats.speed = 1;
+        }
+
+        playerHP = Mathf.Max(1, playerStats.maxHP);
+        playerMP = Mathf.Max(0, playerStats.maxMP);
+
+        if (playerStats != null && playerStats.portrait != null && playerSprite != null)
             playerSprite.sprite = playerStats.portrait;
 
-        // initialize enemies list from enemyStatsArray
         BuildEnemyInstances();
-
-        // set UI for current target (first alive)
         UpdateTargetUI();
-
         UpdateHUD();
 
-        // wire buttons (null-checked) - start coroutines for turn sequencing
+        // Wire main buttons with null checks
         if (attackButton != null) attackButton.onClick.AddListener(() => TakeTurnBasicAttack());
         if (skillButton != null) skillButton.onClick.AddListener(OpenSkillMenu);
         if (runButton != null) runButton.onClick.AddListener(RunAttempt);
@@ -93,11 +119,9 @@ public class CombatManager : MonoBehaviour
 
         BuildSkillMenu();
 
-        // hide skill menu
         if (skillMenuPanel != null)
             skillMenuPanel.SetActive(false);
 
-        // ensure turn indicator is always present; start empty
         if (turnIndicatorText != null)
         {
             turnIndicatorText.gameObject.SetActive(true);
@@ -105,201 +129,155 @@ public class CombatManager : MonoBehaviour
         }
     }
 
-    // -----------------------------
-    // Enemy spawn / naming
-    // -----------------------------
+    // --------------------------------------------------------------
+    // TARGET SELECTION
+    // --------------------------------------------------------------
+    void OpenTargetSelection(SkillSO skill)
+    {
+        if (targetSelectionPanel == null || targetButtonsContainer == null || targetButtonPrefab == null)
+        {
+            Debug.LogWarning("Target selection UI not fully assigned.");
+            return;
+        }
+
+        selectedSkill = skill;
+
+        foreach (Transform child in targetButtonsContainer)
+            Destroy(child.gameObject);
+
+        for (int i = 0; i < enemies.Count; i++)
+        {
+            if (!enemies[i].IsAlive) continue;
+
+            int idx = i;
+
+            Button btn = Instantiate(targetButtonPrefab, targetButtonsContainer);
+            var label = btn.GetComponentInChildren<TextMeshProUGUI>();
+            if (label != null) label.text = enemies[i].displayName;
+
+            btn.onClick.AddListener(() =>
+            {
+                selectedTargetIndex = idx;
+                targetSelectionPanel.SetActive(false);
+                StartCoroutine(TakeTurnRoutine(selectedSkill, selectedTargetIndex));
+            });
+        }
+
+        targetSelectionPanel.SetActive(true);
+    }
+
+    // --------------------------------------------------------------
+    // SPAWN & NAME ENEMIES
+    // --------------------------------------------------------------
     private void BuildEnemyInstances()
     {
         enemies.Clear();
 
         if (enemyStatsArray == null || enemyStatsArray.Length == 0)
         {
-            AddToLog("No enemies assigned to spawn.");
+            AddToLog("No enemies provided.");
             return;
         }
 
-        // Count occurrences of each base name
-        Dictionary<string, int> nameCounts = new Dictionary<string, int>();
-        foreach (var s in enemyStatsArray)
-        {
-            string baseName = s.displayName ?? "Enemy";
-            if (!nameCounts.ContainsKey(baseName)) nameCounts[baseName] = 0;
-            nameCounts[baseName]++;
-        }
-
-        // Prepare suffix counters to assign letters A, B, C...
+        Dictionary<string, int> nameCount = new Dictionary<string, int>();
         Dictionary<string, int> suffixIndex = new Dictionary<string, int>();
 
-        // Create instances and assign display names with suffix if needed
         foreach (var s in enemyStatsArray)
         {
-            var inst = new EnemyInstance();
+            string nm = string.IsNullOrEmpty(s.displayName) ? "Enemy" : s.displayName;
+            if (!nameCount.ContainsKey(nm))
+                nameCount[nm] = 0;
+            nameCount[nm]++;
+        }
+
+        foreach (var s in enemyStatsArray)
+        {
+            EnemyInstance inst = new EnemyInstance();
             inst.stats = s;
-            inst.currentHP = s.maxHP;
-            inst.currentMP = s.maxMP;
+            inst.currentHP = Mathf.Max(1, s.maxHP);
+            inst.currentMP = Mathf.Max(0, s.maxMP);
             inst.portrait = s.portrait;
 
-            string baseName = s.displayName ?? "Enemy";
-            int totalSame = nameCounts.ContainsKey(baseName) ? nameCounts[baseName] : 1;
+            string baseName = string.IsNullOrEmpty(s.displayName) ? "Enemy" : s.displayName;
+            if (!suffixIndex.ContainsKey(baseName))
+                suffixIndex[baseName] = 0;
 
-            if (!suffixIndex.ContainsKey(baseName)) suffixIndex[baseName] = 0;
             int idx = suffixIndex[baseName];
-            suffixIndex[baseName] = idx + 1;
+            suffixIndex[baseName]++;
 
-            if (totalSame > 1)
-            {
-                // assign suffix as letter A, B, C...
-                char letter = (char)('A' + idx);
-                inst.displayName = $"{baseName} ({letter})";
-            }
-            else
-            {
-                inst.displayName = baseName;
-            }
+            inst.displayName = (nameCount[baseName] > 1)
+                ? $"{baseName} ({(char)('A' + idx)})"
+                : baseName;
 
             enemies.Add(inst);
-
-            // Log spawn
             AddToLog($"Spawned enemy: {inst.displayName} - HP: {inst.currentHP}");
         }
     }
 
-    // -----------------------------
-    // UI updates & HUD
-    // -----------------------------
+    // --------------------------------------------------------------
+    // HUD UPDATES
+    // --------------------------------------------------------------
     void UpdateHUD()
     {
-        // player HUD
-        if (playerHPText != null) playerHPText.text = $"HP: {playerHP}/{playerStats.maxHP}";
-        if (playerMPText != null) playerMPText.text = $"MP: {playerMP}/{playerStats.maxMP}";
-
-        // target (first alive) is displayed separately by UpdateTargetUI()
+        if (playerHPText != null)
+            playerHPText.text = $"HP: {playerHP}/{playerStats.maxHP}";
+        if (playerMPText != null)
+            playerMPText.text = $"MP: {playerMP}/{playerStats.maxMP}";
     }
 
     void UpdateTargetUI()
     {
         EnemyInstance target = GetFirstAliveEnemy();
-        if (target != null)
+        if (target == null)
         {
-            if (enemyHPText != null) enemyHPText.text = $"HP: {target.currentHP}/{target.stats.maxHP}";
-            if (target.portrait != null && enemySprite != null)
-                enemySprite.sprite = target.portrait;
-        }
-        else
-        {
-            // no alive enemies
             if (enemyHPText != null) enemyHPText.text = $"HP: 0/0";
-            // keep sprite as last state or clear it
+            return;
         }
+
+        if (enemyHPText != null) enemyHPText.text = $"HP: {target.currentHP}/{target.stats.maxHP}";
+
+        if (target.portrait != null && enemySprite != null)
+            enemySprite.sprite = target.portrait;
     }
 
-    // replace existing AddToLog with this:
+    // --------------------------------------------------------------
+    // BATTLE LOG
+    // --------------------------------------------------------------
     void AddToLog(string message)
     {
         logContent += message + "\n";
-
-        if (battleLogText != null)
-        {
-            // ensure log text object is active and visible
-            if (!battleLogText.gameObject.activeSelf) battleLogText.gameObject.SetActive(true);
-            var c = battleLogText.color;
-            if (c.a < 1f) battleLogText.color = new Color(c.r, c.g, c.b, 1f);
-
-            battleLogText.text = logContent;
-        }
-
-        // start coroutine to scroll after UI updates
+        if (battleLogText != null) battleLogText.text = logContent;
         StartCoroutine(ScrollToBottomNextFrame());
     }
 
     private IEnumerator ScrollToBottomNextFrame()
     {
-        // wait one frame so Unity updates layout
         yield return null;
-
-        if (battleLogScrollRect == null)
-            yield break;
-
-        RectTransform content = battleLogScrollRect.content;
-        RectTransform viewport = battleLogScrollRect.viewport;
-        if (content == null || viewport == null)
-            yield break;
-
-        // Force layout rebuild so sizes are accurate
-        LayoutRebuilder.ForceRebuildLayoutImmediate(content);
-        Canvas.ForceUpdateCanvases();
-
-        // sometimes ContentSizeFitter / LayoutGroups need an extra frame
-        yield return null;
-
-        // decide whether to snap to bottom or keep at top depending on content size and pivot
-        bool contentFits = content.rect.height <= viewport.rect.height;
-
-        // If content fits, keep at top (1f). If content larger than viewport, scroll to bottom (0f).
-        float target = contentFits ? 1f : 0f;
-
-        // Apply target and clear any velocity/inertia
-        battleLogScrollRect.verticalNormalizedPosition = target;
+        if (battleLogScrollRect == null || battleLogScrollRect.content == null) yield break;
+        LayoutRebuilder.ForceRebuildLayoutImmediate(battleLogScrollRect.content);
+        battleLogScrollRect.verticalNormalizedPosition = 0f;
         battleLogScrollRect.velocity = Vector2.zero;
-        battleLogScrollRect.inertia = false;
-
-        // Force update so the visible position is applied immediately
-        Canvas.ForceUpdateCanvases();
-
-        // restore inertia next frame to avoid visual jump
-        yield return null;
-        battleLogScrollRect.inertia = true;
     }
 
-    void ClearLog()
+    // --------------------------------------------------------------
+    // TARGET HELPERS
+    // --------------------------------------------------------------
+    EnemyInstance GetFirstAliveEnemy()
     {
-        logContent = "";
-        if (battleLogText != null) battleLogText.text = "";
-    }
+        foreach (var e in enemies)
+            if (e.IsAlive)
+                return e;
 
-    // -----------------------------
-    // Damage helper and targeting
-    // -----------------------------
-    private EnemyInstance GetFirstAliveEnemy()
-    {
-        for (int i = 0; i < enemies.Count; i++)
-        {
-            if (enemies[i].IsAlive) return enemies[i];
-        }
         return null;
     }
 
-    private int GetFirstAliveEnemyIndex()
+    int GetFirstAliveEnemyIndex()
     {
         for (int i = 0; i < enemies.Count; i++)
-            if (enemies[i].IsAlive) return i;
+            if (enemies[i].IsAlive)
+                return i;
+
         return -1;
-    }
-
-    private void HandleEnemyDeathIfAny(int enemyIndex)
-    {
-        if (enemyIndex < 0 || enemyIndex >= enemies.Count) return;
-        var inst = enemies[enemyIndex];
-        if (inst.IsAlive) return;
-
-        // Log defeat
-        AddToLog($"{inst.displayName} defeated");
-
-        // Optional: change sprite/hide etc. For now, update target UI to next alive
-        UpdateTargetUI();
-
-        // Check if all enemies dead
-        bool anyAlive = false;
-        foreach (var e in enemies)
-        {
-            if (e.IsAlive) { anyAlive = true; break; }
-        }
-
-        if (!anyAlive)
-        {
-            // player wins
-            EndBattle(true);
-        }
     }
 
     private int CalculateDamageInt(int atk, int def, float power)
@@ -308,296 +286,220 @@ public class CombatManager : MonoBehaviour
         return Mathf.RoundToInt(Mathf.Max(1f, raw));
     }
 
-    // --- Attack ---
+    // --------------------------------------------------------------
+    // BASIC ATTACK (SAFE)
+    // --------------------------------------------------------------
     void TakeTurnBasicAttack()
     {
+        int idx = GetFirstAliveEnemyIndex();
+
+        if (idx < 0)
+        {
+            AddToLog("No enemies to attack.");
+            return;
+        }
+
         SkillSO temp = ScriptableObject.CreateInstance<SkillSO>();
         temp.skillName = "Attack";
         temp.type = SkillType.Physical;
         temp.power = 1f;
-        temp.mpCost = 0;
-        temp.speedModifier = 0;
 
-        StartCoroutine(TakeTurnRoutine(temp)); // use coroutine so animation timing is respected
+        StartCoroutine(TakeTurnRoutine(temp, idx));
     }
 
-    // -----------------------------
-    // Skill menu
-    // -----------------------------
-    void OpenSkillMenu()
-    {
-        if (skillMenuPanel != null)
-            skillMenuPanel.SetActive(true);
-    }
-
-    void CloseSkillMenu()
-    {
-        if (skillMenuPanel != null)
-            skillMenuPanel.SetActive(false);
-    }
+    // --------------------------------------------------------------
+    // SKILL MENU
+    // --------------------------------------------------------------
+    void OpenSkillMenu() { if (skillMenuPanel != null) skillMenuPanel.SetActive(true); }
+    void CloseSkillMenu() { if (skillMenuPanel != null) skillMenuPanel.SetActive(false); }
 
     void BuildSkillMenu()
     {
-        if (skillMenuPanel == null || skillButtonsContainer == null || skillButtonPrefab == null) return;
+        if (skillButtonsContainer == null || skillButtonPrefab == null) return;
 
-        // clear only the container so Close button remains
-        for (int i = skillButtonsContainer.childCount - 1; i >= 0; i--)
-            Destroy(skillButtonsContainer.GetChild(i).gameObject);
+        foreach (Transform child in skillButtonsContainer)
+            Destroy(child.gameObject);
 
         if (availableSkills == null || availableSkills.Length == 0) return;
 
         foreach (SkillSO skill in availableSkills)
         {
-            Button btn = Instantiate(skillButtonPrefab, skillButtonsContainer, false);
-            btn.gameObject.SetActive(true);
+            Button btn = Instantiate(skillButtonPrefab, skillButtonsContainer);
+            var label = btn.GetComponentInChildren<TextMeshProUGUI>();
+            if (label != null) label.text = skill.skillName;
 
-            TextMeshProUGUI btnText = btn.GetComponentInChildren<TextMeshProUGUI>();
-            if (btnText != null)
-                btnText.text = skill.skillName;
-
-            // ensure LayoutElement for visible size in a Vertical Layout Group
-            var le = btn.GetComponent<LayoutElement>();
-            if (le == null) le = btn.gameObject.AddComponent<LayoutElement>();
-            le.preferredHeight = 56;
-
-            btn.onClick.RemoveAllListeners();
-            SkillSO captured = skill;
             btn.onClick.AddListener(() =>
             {
                 CloseSkillMenu();
-                StartCoroutine(TakeTurnRoutine(captured)); // start coroutine so sequencing works
+                StartCoroutine(TakeTurnRoutine(skill, GetFirstAliveEnemyIndex()));
             });
         }
     }
 
-    // -----------------------------
-    // Core turn flow (targets first alive enemy)
-    // -----------------------------
-    void TakeTurn(SkillSO skill)
+    // --------------------------------------------------------------
+    // MAIN TURN ROUTINE (SAFE TARGETING)
+    // --------------------------------------------------------------
+    IEnumerator TakeTurnRoutine(SkillSO skill, int targetIndex)
     {
-        // compute player effective speed
-        int playerEffectiveSpeed = playerStats.speed + Mathf.RoundToInt(skill.speedModifier);
-
-        // for simplicity enemy speed compare to first alive enemy (if any)
-        EnemyInstance target = GetFirstAliveEnemy();
-        if (target == null)
+        if (targetIndex < 0 || targetIndex >= enemies.Count || !enemies[targetIndex].IsAlive)
         {
-            AddToLog("No enemies to target.");
-            EndBattle(true);
-            return;
+            targetIndex = GetFirstAliveEnemyIndex();
+            if (targetIndex < 0)
+            {
+                EndBattle(true);
+                yield break;
+            }
         }
 
-        int enemyEffectiveSpeed = target.stats.speed;
+        SetCommands(false);
 
-        bool playerGoesFirst = playerEffectiveSpeed >= enemyEffectiveSpeed;
+        EnemyInstance target = enemies[targetIndex];
+
+        int playerSpeed = playerStats.speed + Mathf.RoundToInt(skill.speedModifier);
+        int enemySpeed = target.stats.speed;
+
+        bool playerGoesFirst = playerSpeed >= enemySpeed;
 
         if (playerGoesFirst)
         {
-            if (PlayerAction(skill) && AnyEnemyAlive()) EnemyTurn();
+            if (turnIndicatorText != null) turnIndicatorText.text = "Player Turn";
+            PlayerAction(skill, targetIndex);
+            yield return new WaitForSeconds(0.5f);
+
+            if (playerHP > 0 && target.IsAlive)
+            {
+                if (turnIndicatorText != null) turnIndicatorText.text = "Enemy Turn";
+                EnemyTurn();
+                yield return new WaitForSeconds(0.5f);
+            }
         }
         else
         {
+            if (turnIndicatorText != null) turnIndicatorText.text = "Enemy Turn";
             EnemyTurn();
-            if (playerHP > 0 && AnyEnemyAlive()) PlayerAction(skill);
+            yield return new WaitForSeconds(0.5f);
+
+            if (playerHP > 0 && target.IsAlive)
+            {
+                if (turnIndicatorText != null) turnIndicatorText.text = "Player Turn";
+                PlayerAction(skill, targetIndex);
+                yield return new WaitForSeconds(0.5f);
+            }
         }
+
+        if (turnIndicatorText != null) turnIndicatorText.text = "";
+        SetCommands(true);
     }
 
-    bool AnyEnemyAlive()
-    {
-        foreach (var e in enemies) if (e.IsAlive) return true;
-        return false;
-    }
-
-    // -----------------------------
-    // PlayerAction: hits first alive enemy
-    // -----------------------------
-    bool PlayerAction(SkillSO skill)
+    // --------------------------------------------------------------
+    // PLAYER ACTION
+    // --------------------------------------------------------------
+    bool PlayerAction(SkillSO skill, int targetIndex)
     {
         if (playerMP < skill.mpCost)
         {
-            AddToLog("Not enough MP for " + skill.skillName + "!");
+            AddToLog("Not enough MP!");
             return false;
         }
 
         playerMP -= skill.mpCost;
 
-        if (Random.value > skill.accuracy)
-        {
-            AddToLog($"Player's {skill.skillName} missed!");
-            UpdateHUD();
-            return true;
-        }
-
-        int dmg = 0;
-        EnemyInstance target = GetFirstAliveEnemy();
-        int targetIndex = GetFirstAliveEnemyIndex();
-        if (target == null)
+        if (targetIndex < 0 || targetIndex >= enemies.Count)
         {
             AddToLog("No valid target.");
             return false;
         }
 
+        EnemyInstance target = enemies[targetIndex];
+
+        int dmg = 0;
+
         if (skill.type == SkillType.Physical)
-        {
             dmg = CalculateDamageInt(playerStats.attack, target.stats.defense, skill.power);
-            if (Random.value < skill.criticalChance)
-            {
-                dmg = Mathf.RoundToInt(dmg * skill.criticalMultiplier);
-                AddToLog("Critical hit!");
-            }
-            // animación de ataque del jugador
-            if (playerSprite != null && playerSprite.rectTransform != null)
-                StartCoroutine(BattleAnimations.AttackMove(
-                    playerSprite.rectTransform,
-                    playerSprite.rectTransform.anchoredPosition,
-                    attackMoveDistance,
-                    attackMoveDuration));
 
-            target.currentHP = Mathf.Max(0, target.currentHP - dmg);
-            AddToLog($"Player uses {skill.skillName} on {target.displayName} for {dmg} physical damage!");
-
-            if (enemySprite != null)
-                StartCoroutine(BattleAnimations.TakeDamageFlash(
-                    enemySprite,
-                    Color.red,
-                    damageFlashDuration,
-                    damageFlashes));
-        }
         else if (skill.type == SkillType.Magical)
-        {
             dmg = CalculateDamageInt(playerStats.mAttack, target.stats.mDefense, skill.power);
-            if (Random.value < skill.criticalChance)
-            {
-                dmg = Mathf.RoundToInt(dmg * skill.criticalMultiplier);
-                AddToLog("Magic critical hit!");
-            }
-            if (playerSprite != null && playerSprite.rectTransform != null)
-                StartCoroutine(BattleAnimations.AttackMove(playerSprite.rectTransform, playerSprite.rectTransform.anchoredPosition));
-            target.currentHP = Mathf.Max(0, target.currentHP - dmg);
-            AddToLog($"Player casts {skill.skillName} on {target.displayName} for {dmg} magical damage!");
-            if (enemySprite != null)
-                StartCoroutine(BattleAnimations.TakeDamageFlash(enemySprite, Color.red));
-        }
+
         else if (skill.type == SkillType.Support)
         {
-            int heal = Mathf.RoundToInt(Mathf.Max(1f, skill.effectAmount));
+            int heal = skill.effectAmount;
             playerHP = Mathf.Min(playerStats.maxHP, playerHP + heal);
-            AddToLog($"Player uses {skill.skillName} and heals {heal} HP!");
+            AddToLog($"Player healed {heal} HP!");
+            UpdateHUD();
+            return true;
         }
 
-        // handle potential death of targeted enemy
+        target.currentHP = Mathf.Max(0, target.currentHP - dmg);
+        AddToLog($"Player used {skill.skillName} on {target.displayName} for {dmg} damage!");
+
         if (target.currentHP <= 0)
-        {
-            HandleEnemyDeathIfAny(targetIndex);
-        }
+            HandleEnemyDeath(targetIndex);
         else
-        {
-            // update target UI only if current target changed or damaged
             UpdateTargetUI();
-        }
 
         UpdateHUD();
         return true;
     }
 
-    // -----------------------------
-    // Enemy AI: choose a skill and act against player
-    // -----------------------------
-    void EnemyTurn()
+    // --------------------------------------------------------------
+    // DEATH HANDLING
+    // --------------------------------------------------------------
+    void HandleEnemyDeath(int index)
     {
-        // pick first alive enemy to act
-        int actingIndex = GetFirstAliveEnemyIndex();
-        if (actingIndex < 0) return;
+        if (index < 0 || index >= enemies.Count) return;
 
-        var actingEnemy = enemies[actingIndex];
+        AddToLog($"{enemies[index].displayName} defeated!");
 
-        if (actingEnemy.stats.availableSkills == null || actingEnemy.stats.availableSkills.Length == 0)
-        {
-            // fallback to physical attack
-            int dmg = CalculateDamageInt(actingEnemy.stats.attack, playerStats.defense, 1f);
-            playerHP = Mathf.Max(0, playerHP - dmg);
-            AddToLog($"{actingEnemy.displayName} attacks for {dmg} damage!");
-            if (playerHP <= 0) { EndBattle(false); return; }
-            UpdateHUD();
-            return;
-        }
+        selectedTargetIndex = GetFirstAliveEnemyIndex();
 
-        // pick random skill from that enemy's list
-        SkillSO skill = actingEnemy.stats.availableSkills[Random.Range(0, actingEnemy.stats.availableSkills.Length)];
+        if (!AnyEnemyAlive())
+            EndBattle(true);
 
-        if (actingEnemy.currentMP < skill.mpCost)
-        {
-            AddToLog($"{actingEnemy.displayName} tried to use {skill.skillName} but lacks MP!");
-            // fallback to physical attack
-            int dmg = CalculateDamageInt(actingEnemy.stats.attack, playerStats.defense, 1f);
-            playerHP = Mathf.Max(0, playerHP - dmg);
-            AddToLog($"{actingEnemy.displayName} attacks for {dmg} damage!");
-            if (playerHP <= 0) { EndBattle(false); return; }
-            UpdateHUD();
-            return;
-        }
-
-        // perform enemy action (target player)
-        EnemyAction(actingEnemy, skill);
+        UpdateTargetUI();
     }
 
-    void EnemyAction(EnemyInstance actingEnemy, SkillSO skill)
+    bool AnyEnemyAlive()
     {
-        actingEnemy.currentMP -= skill.mpCost;
+        foreach (var e in enemies)
+            if (e.IsAlive) return true;
 
-        if (Random.value > skill.accuracy)
+        return false;
+    }
+
+    // --------------------------------------------------------------
+    // ENEMY TURN
+    // --------------------------------------------------------------
+    void EnemyTurn()
+    {
+        int i = GetFirstAliveEnemyIndex();
+        if (i < 0) return;
+
+        EnemyInstance e = enemies[i];
+
+        SkillSO skill = null;
+
+        if (e.stats.availableSkills != null && e.stats.availableSkills.Length > 0)
         {
-            AddToLog($"{actingEnemy.displayName}'s {skill.skillName} missed!");
-            return;
+            skill = e.stats.availableSkills[Random.Range(0, e.stats.availableSkills.Length)];
+            if (e.currentMP < skill.mpCost)
+                skill = null;
         }
 
         int dmg = 0;
 
-        if (skill.type == SkillType.Physical)
+        if (skill == null)
         {
-            dmg = CalculateDamageInt(actingEnemy.stats.attack, playerStats.defense, skill.power);
-            if (Random.value < skill.criticalChance)
-            {
-                dmg = Mathf.RoundToInt(dmg * skill.criticalMultiplier);
-                AddToLog("Enemy critical hit!");
-            }
-            if (enemySprite != null && enemySprite.rectTransform != null)
-                StartCoroutine(BattleAnimations.AttackMove(
-                    enemySprite.rectTransform,
-                    enemySprite.rectTransform.anchoredPosition,
-                    -attackMoveDistance,
-                    attackMoveDuration));
+            dmg = CalculateDamageInt(e.stats.attack, playerStats.defense, 1f);
+            AddToLog($"{e.displayName} attacks for {dmg}!");
+        }
+        else
+        {
+            dmg = CalculateDamageInt(e.stats.attack, playerStats.defense, skill.power);
+            AddToLog($"{e.displayName} used {skill.skillName} for {dmg}!");
+            e.currentMP -= skill.mpCost;
+        }
 
-            playerHP = Mathf.Max(0, playerHP - dmg);
-            AddToLog($"{actingEnemy.displayName} uses {skill.skillName} for {dmg} physical damage!");
-            if (playerSprite != null)
-                StartCoroutine(BattleAnimations.TakeDamageFlash(
-                    playerSprite,
-                    Color.red,
-                    damageFlashDuration,
-                    damageFlashes));
-        }
-        else if (skill.type == SkillType.Magical)
-        {
-            dmg = CalculateDamageInt(actingEnemy.stats.mAttack, playerStats.mDefense, skill.power);
-            if (Random.value < skill.criticalChance)
-            {
-                dmg = Mathf.RoundToInt(dmg * skill.criticalMultiplier);
-                AddToLog("Enemy magic critical hit!");
-            }
-            if (enemySprite != null && enemySprite.rectTransform != null)
-                StartCoroutine(BattleAnimations.AttackMove(enemySprite.rectTransform, enemySprite.rectTransform.anchoredPosition, -50f));
-            playerHP = Mathf.Max(0, playerHP - dmg);
-            AddToLog($"{actingEnemy.displayName} casts {skill.skillName} for {dmg} magical damage!");
-            if (playerSprite != null)
-                StartCoroutine(BattleAnimations.TakeDamageFlash(playerSprite, Color.red));  
-        }
-        else if (skill.type == SkillType.Support)
-        {
-            int heal = Mathf.RoundToInt(Mathf.Max(1f, skill.effectAmount));
-            actingEnemy.currentHP = Mathf.Min(actingEnemy.stats.maxHP, actingEnemy.currentHP + heal);
-            AddToLog($"{actingEnemy.displayName} heals for {heal} HP!");
-        }
+        playerHP = Mathf.Max(0, playerHP - dmg);
 
         if (playerHP <= 0)
         {
@@ -608,24 +510,23 @@ public class CombatManager : MonoBehaviour
         UpdateHUD();
     }
 
-    // -----------------------------
-    // Run attempt (unchanged)
-    // -----------------------------
+    // --------------------------------------------------------------
+    // RUN
+    // --------------------------------------------------------------
     void RunAttempt()
     {
-        AddToLog("Player tries to escape...");
+        EnemyInstance e = GetFirstAliveEnemy();
 
-        EnemyInstance target = GetFirstAliveEnemy();
-        if (target == null)
+        if (e == null)
         {
             AddToLog("No enemies to escape from.");
-            EndBattle(false);
+            StartCoroutine(ReturnToRoom());
             return;
         }
 
-        if (playerStats.speed > target.stats.speed)
+        if (playerStats.speed > e.stats.speed)
         {
-            AddToLog("Escaped successfully!");
+            AddToLog("Escaped!");
             EndBattle(false);
         }
         else
@@ -633,106 +534,55 @@ public class CombatManager : MonoBehaviour
             int roll = Random.Range(0, 100);
             if (roll < 50)
             {
-                AddToLog("Escape failed!");
+                AddToLog("Failed to escape!");
                 EnemyTurn();
             }
             else
             {
-                AddToLog("Escaped successfully!");
+                AddToLog("Escaped!");
                 EndBattle(false);
             }
         }
     }
 
-    // -----------------------------
-    // End battle
-    // -----------------------------
+    // --------------------------------------------------------------
+    // END BATTLE
+    // --------------------------------------------------------------
     void EndBattle(bool playerWon)
     {
-        if (playerWon) AddToLog("Victory!");
-        else AddToLog("Battle ended.");
+        AddToLog(playerWon ? "VICTORY!" : "DEFEAT...");
 
+        // Disable UI input
         if (attackButton != null) attackButton.interactable = false;
         if (skillButton != null) skillButton.interactable = false;
         if (runButton != null) runButton.interactable = false;
         if (skillMenuPanel != null) skillMenuPanel.SetActive(false);
 
-        UpdateHUD();
+        // Start return coroutine
+        StartCoroutine(ReturnToRoom());
     }
 
-    // New: Sequenced turn coroutine to show turn indicator, run action, wait for animations, then enemy action
-    private IEnumerator TakeTurnRoutine(SkillSO skill)
+    IEnumerator ReturnToRoom()
     {
-        // disable input while turn sequence plays
-        SetCommandButtonsInteractable(false);
+        // clear pending enemies so memory doesn't leak
+        BattleData.pendingEnemies = null;
 
-        // compute who goes first (same logic as before)
-        int playerEffectiveSpeed = playerStats.speed + Mathf.RoundToInt(skill.speedModifier);
-        EnemyInstance target = GetFirstAliveEnemy();
-        if (target == null)
-        {
-            AddToLog("No enemies to target.");
-            EndBattle(true);
-            yield break;
-        }
-        int enemyEffectiveSpeed = target.stats.speed;
-        bool playerGoesFirst = playerEffectiveSpeed >= enemyEffectiveSpeed;
+        yield return new WaitForSeconds(1.5f);
 
-        if (playerGoesFirst)
-        {
-            // show player turn (do not add log separator; update indicator text only)
-            if (turnIndicatorText != null) turnIndicatorText.text = "Player Turn";
+        // Load RoomScene (safe)
+        string sceneToReturn = RoomMemory.lastRoomScene;
 
-            // perform player action (synchronous logic triggers animations)
-            PlayerAction(skill);
+if (string.IsNullOrEmpty(sceneToReturn))
+    sceneToReturn = "RoomScene"; // fallback
 
-            // wait for animations and flashes to finish
-            yield return new WaitForSeconds(attackMoveDuration + damageFlashDuration * damageFlashes + turnPause);
+SceneManager.LoadScene(sceneToReturn);
 
-            // if enemy still alive, enemy acts
-            if (AnyEnemyAlive())
-            {
-                if (turnIndicatorText != null) turnIndicatorText.text = "Enemy Turn";
-
-                EnemyTurn(); // enemy logic triggers its animations
-                yield return new WaitForSeconds(attackMoveDuration + damageFlashDuration * damageFlashes + turnPause);
-            }
-        }
-        else
-        {
-            // enemy goes first
-            if (turnIndicatorText != null) turnIndicatorText.text = "Enemy Turn";
-
-            EnemyTurn();
-            yield return new WaitForSeconds(attackMoveDuration + damageFlashDuration * damageFlashes + turnPause);
-
-            if (playerHP > 0 && AnyEnemyAlive())
-            {
-                if (turnIndicatorText != null) turnIndicatorText.text = "Player Turn";
-
-                PlayerAction(skill);
-                yield return new WaitForSeconds(attackMoveDuration + damageFlashDuration * damageFlashes + turnPause);
-            }
-        }
-
-        // clear turn indicator text (do not deactivate GameObject)
-        if (turnIndicatorText != null)
-        {
-            yield return new WaitForSeconds(0.25f);
-            turnIndicatorText.text = "";
-        }
-
-        // re-enable input
-        SetCommandButtonsInteractable(true);
-
-        UpdateHUD();
-        UpdateTargetUI();
     }
 
-    private void SetCommandButtonsInteractable(bool value)
+    void SetCommands(bool v)
     {
-        if (attackButton != null) attackButton.interactable = value;
-        if (skillButton != null) skillButton.interactable = value;
-        if (runButton != null) runButton.interactable = value;
+        if (attackButton != null) attackButton.interactable = v;
+        if (skillButton != null) skillButton.interactable = v;
+        if (runButton != null) runButton.interactable = v;
     }
 }

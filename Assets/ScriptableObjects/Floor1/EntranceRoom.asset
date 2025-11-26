@@ -1,0 +1,28 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5b6e7761ca334cb4dbec907f0dd5e20d, type: 3}
+  m_Name: EntranceRoom
+  m_EditorClassIdentifier: 
+  description: You enter the dungeon. A door in front of you.
+  roomImage: {fileID: 21300000, guid: 08bf9a0910ef3234b8e770e537fbf76a, type: 3}
+  choices:
+  - choiceText: Enter
+    resultType: 0
+    nextRoom: {fileID: 11400000, guid: 085e75ddffaa88c4fa73922ace4cd64c, type: 2}
+    corridorSize: 1
+    eventID: 
+  - choiceText: Leave
+    resultType: 0
+    nextRoom: {fileID: 11400000}
+    corridorSize: 0
+    eventID: 
+  disableCorridorsAndEncounters: 1

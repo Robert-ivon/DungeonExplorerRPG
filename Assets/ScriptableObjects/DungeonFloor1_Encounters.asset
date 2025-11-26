@@ -1,0 +1,17 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c52e9b48174fc234da14178b99943288, type: 3}
+  m_Name: DungeonFloor1_Encounters
+  m_EditorClassIdentifier: 
+  encounters:
+  - group: {fileID: 11400000, guid: d102b2a44f5a1d74783782c03c7b2615, type: 2}
+    weight: 50

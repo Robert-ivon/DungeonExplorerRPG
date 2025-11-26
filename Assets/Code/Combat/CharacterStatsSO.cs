@@ -3,19 +3,18 @@
 [CreateAssetMenu(menuName = "Game/Character Stats")]
 public class CharacterStatsSO : ScriptableObject
 {
-    public string id;
     public string displayName;
-   
-    public int maxHP = 100;
-    public int maxMP = 20;
-    public int attack = 10;
-    public int defense = 5;
-    public int speed = 10;
-    public int mAttack = 8;   
-    public int mDefense = 5;  
-    
-    public Sprite portrait; // optional for UI
 
-    [Header("Skills")]
+    public int maxHP;
+    public int maxMP;
+
+    public int attack;
+    public int defense;
+    public int mAttack;
+    public int mDefense;
+    public int speed;
+
+    public Sprite portrait;
+
     public SkillSO[] availableSkills;
 }

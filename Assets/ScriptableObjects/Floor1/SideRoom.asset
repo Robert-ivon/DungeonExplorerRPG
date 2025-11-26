@@ -1,0 +1,23 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5b6e7761ca334cb4dbec907f0dd5e20d, type: 3}
+  m_Name: SideRoom
+  m_EditorClassIdentifier: 
+  description: A quiet room you. find nothing
+  roomImage: {fileID: 21300000, guid: 1b38f3c58943d4849bbb93900ef39cf2, type: 3}
+  choices:
+  - choiceText: Return
+    resultType: 0
+    nextRoom: {fileID: 11400000, guid: 085e75ddffaa88c4fa73922ace4cd64c, type: 2}
+    corridorSize: 0
+    eventID: 
+  disableCorridorsAndEncounters: 0
